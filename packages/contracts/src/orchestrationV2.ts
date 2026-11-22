@@ -472,8 +472,19 @@ const OrchestrationV2LastTitleRegeneration = Schema.Struct({
   completedAt: Schema.DateTimeUtc,
 });
 
+export const WorkerExecutionLimits = Schema.Struct({
+  deadlineAt: Schema.DateTimeUtc,
+  maxConcurrentTasks: PositiveInt,
+  maxTokens: Schema.optional(NonNegativeInt),
+  maxCostUsd: Schema.optional(Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0))),
+  denySecretReads: Schema.optional(Schema.Literal(true)),
+});
+export type WorkerExecutionLimits = typeof WorkerExecutionLimits.Type;
+
 export const OrchestrationV2AppThread = Schema.Struct({
   ...OrchestrationV2CreationFields,
+  workerLimits: Schema.optional(WorkerExecutionLimits),
+  delegationLimits: Schema.optional(WorkerExecutionLimits),
   id: ThreadId,
   projectId: ProjectId,
   title: TrimmedNonEmptyString,
@@ -2336,6 +2347,8 @@ export type OrchestrationV2LatestVisibleMessageSummary =
   typeof OrchestrationV2LatestVisibleMessageSummary.Type;
 
 export const OrchestrationV2ThreadShell = Schema.Struct({
+  workerLimits: OrchestrationV2AppThread.fields.workerLimits,
+  delegationLimits: OrchestrationV2AppThread.fields.delegationLimits,
   ...OrchestrationV2CreationFields,
   id: ThreadId,
   projectId: ProjectId,
@@ -2564,6 +2577,18 @@ export type OrchestrationV2StoredEvent = typeof OrchestrationV2StoredEvent.Type;
 
 export const OrchestrationV2AppThreadJson = OrchestrationV2AppThread.mapFields((fields) => ({
   ...fields,
+  delegationLimits: Schema.optional(
+    WorkerExecutionLimits.mapFields((limits) => ({
+      ...limits,
+      deadlineAt: Schema.DateTimeUtcFromString,
+    })),
+  ),
+  workerLimits: Schema.optional(
+    WorkerExecutionLimits.mapFields((limits) => ({
+      ...limits,
+      deadlineAt: Schema.DateTimeUtcFromString,
+    })),
+  ),
   createdAt: Schema.DateTimeUtcFromString,
   updatedAt: Schema.DateTimeUtcFromString,
   archivedAt: Schema.NullOr(Schema.DateTimeUtcFromString),
@@ -3015,6 +3040,8 @@ export type OrchestrationV2LatestVisibleMessageSummaryJson =
 
 export const OrchestrationV2ThreadShellJson = OrchestrationV2ThreadShell.mapFields((fields) => ({
   ...fields,
+  workerLimits: OrchestrationV2AppThreadJson.fields.workerLimits,
+  delegationLimits: OrchestrationV2AppThreadJson.fields.delegationLimits,
   latestRunRequestedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   latestRunStartedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
   latestRunCompletedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
@@ -3709,6 +3736,7 @@ export const OrchestrationV2Command = Schema.Union([
     parentRunId: RunId,
     parentNodeId: NodeId,
     task: TrimmedNonEmptyString,
+    workerLimits: Schema.optional(WorkerExecutionLimits),
     title: Schema.optional(TrimmedNonEmptyString),
     modelSelection: ModelSelection,
     runtimeMode: RuntimeMode,

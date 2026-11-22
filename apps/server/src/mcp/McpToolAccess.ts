@@ -137,9 +137,21 @@ const writingCaller = refuseReadOnlyClient.pipe(
   Effect.tap(assertLiveCaller),
 );
 
+const assertUnboundedCaller = Effect.fn("McpToolAccess.assertUnboundedCaller")(function* (
+  caller: Caller,
+) {
+  if (caller.caller?.workerLimits !== undefined || caller.caller?.delegationLimits !== undefined) {
+    return yield* new OrchestratorMcpFailure({
+      code: "capability_denied",
+      message: "Bounded task callers may only use delegated tasks to control work.",
+    });
+  }
+});
+
 const orchestratingCaller = refuseReadOnlyClient.pipe(
   Effect.andThen(readCaller()),
   Effect.tap(assertLiveCaller),
+  Effect.tap(assertUnboundedCaller),
 );
 
 const requireThreadCaller = McpInvocationContext.McpInvocationContext.pipe(
@@ -195,10 +207,11 @@ export const writesWithCapability = <P, A, E, R>(handle: (params: P) => Effect.E
   declare(
     (params: P) =>
       writingCaller.pipe(
+        Effect.tap(assertUnboundedCaller),
         Effect.tap((caller) => assertNotLinked(caller, "start work here that is not its link's")),
         Effect.flatMap(() => handle(params)),
       ),
-    () => writingCaller,
+    () => writingCaller.pipe(Effect.tap(assertUnboundedCaller)),
   );
 
 export const writesThreads = <P, A, E, R>(
@@ -209,6 +222,7 @@ export const writesThreads = <P, A, E, R>(
     (params: P) =>
       Effect.gen(function* () {
         const caller = yield* writingCaller;
+        yield* assertUnboundedCaller(caller);
         for (const threadId of threads(params)) {
           if (threadId === undefined || threadId === caller.scope.thread?.threadId) continue;
           const target = yield* caller.threads
@@ -232,7 +246,7 @@ export const writesThreads = <P, A, E, R>(
           ),
         );
       }),
-    () => writingCaller,
+    () => writingCaller.pipe(Effect.tap(assertUnboundedCaller)),
   );
 
 const escalationDenied = (refusal: DispatchModeRefusal) =>
@@ -265,6 +279,7 @@ export const startsThreads = <P, A, E, R>(
   linked: "stamped" | { readonly refused: string },
 ) => {
   const started = Effect.fn("McpToolAccess.started")(function* (caller: Caller, params: P) {
+    yield* assertUnboundedCaller(caller);
     const requested = modes(params);
     return {
       runtimeMode: yield* resolveRuntimeMode(caller.limits.runtimeMode, requested.runtimeMode),
@@ -279,6 +294,7 @@ export const startsThreads = <P, A, E, R>(
     (params: P) =>
       Effect.gen(function* () {
         const caller = yield* writingCaller;
+        yield* assertUnboundedCaller(caller);
         if (linked !== "stamped") yield* assertNotLinked(caller, linked.refused);
         return yield* handle(params, yield* started(caller, params));
       }),

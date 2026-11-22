@@ -12,6 +12,7 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 
@@ -166,6 +167,23 @@ const layerTaskFolderPolicy = layerWithPolicy(
 ).pipe(Layer.provideMerge(layerTaskFolderStore));
 
 it.layer(layerTest)("RuntimePolicyV2", (it) => {
+  it.effect("refuses an expired worker on every start without elevating its runtime mode", () =>
+    Effect.gen(function* () {
+      const policy = yield* RuntimePolicy.RuntimePolicyV2;
+      const now = yield* DateTime.now;
+      const thread = {
+        ...makeThread({ now, worktreePath: "/work", runtimeMode: "approval-required" }),
+        workerLimits: { deadlineAt: DateTime.add(now, { seconds: 1 }), maxConcurrentTasks: 1 },
+      };
+      assert.equal(
+        (yield* policy.resolve({ thread, modelSelection })).runtimeMode,
+        "approval-required",
+      );
+      const expired = { ...thread, workerLimits: { ...thread.workerLimits, deadlineAt: now } };
+      const result = yield* policy.resolve({ thread: expired, modelSelection }).pipe(Effect.exit);
+      assert.isTrue(Exit.isFailure(result));
+    }),
+  );
   it.effect("asks for Antigravity command approval when a stored Auto thread falls back", () =>
     Effect.gen(function* () {
       const policy = yield* RuntimePolicy.RuntimePolicyV2;

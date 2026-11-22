@@ -9924,6 +9924,75 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
 
+      if (parentProjection.thread.workerLimits !== undefined) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "Bounded workers cannot delegate additional tasks.",
+        });
+      }
+      const inherited = parentProjection.thread.delegationLimits;
+      const requested = command.workerLimits ?? inherited;
+      const workerLimits =
+        requested === undefined
+          ? undefined
+          : {
+              ...requested,
+              deadlineAt:
+                inherited !== undefined &&
+                DateTime.isLessThan(inherited.deadlineAt, requested.deadlineAt)
+                  ? inherited.deadlineAt
+                  : requested.deadlineAt,
+              maxConcurrentTasks: Math.min(
+                requested.maxConcurrentTasks,
+                inherited?.maxConcurrentTasks ?? Infinity,
+              ),
+            };
+      const nowForLimits = yield* DateTime.now;
+      if (
+        workerLimits !== undefined &&
+        (DateTime.toEpochMillis(workerLimits.deadlineAt) <= DateTime.toEpochMillis(nowForLimits) ||
+          workerLimits.maxTokens !== undefined ||
+          workerLimits.maxCostUsd !== undefined ||
+          workerLimits.denySecretReads === true)
+      ) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause:
+            "Worker deadline expired or a requested token, cost, or secret-read limit cannot be enforced by this runtime.",
+        });
+      }
+      if (workerLimits !== undefined) {
+        const tasks = yield* mapDispatchError(command)(
+          projectionStore.getThreadRecords(command.parentThreadId, ["subagents"]),
+        );
+        // Failure or interruption may leave a provider alive; keep its slot quarantined.
+        const active = tasks.subagents.filter(
+          (task) => task.origin === "app_owned" && task.status !== "completed",
+        );
+        if (active.length >= workerLimits.maxConcurrentTasks) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: "Concurrent delegated task limit reached.",
+          });
+        }
+        yield* emit(
+          events,
+          command,
+        )({
+          type: "thread.metadata-updated",
+          threadId: command.parentThreadId,
+          occurredAt: nowForLimits,
+          payload: {
+            ...parentProjection.thread,
+            delegationLimits: workerLimits,
+            updatedAt: nowForLimits,
+          },
+        });
+      }
+
       const targetAdapter = yield* providerAdapters.get(command.modelSelection.instanceId).pipe(
         Effect.mapError(
           (cause) =>
@@ -9967,6 +10036,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           createdBy: command.createdBy,
           creationSource: command.creationSource,
         }),
+        ...(workerLimits === undefined ? {} : { workerLimits }),
         runtimeMode: command.runtimeMode,
         interactionMode: command.interactionMode,
         ...(command.workspaceStrategy === undefined ? {} : { branch: null, worktreePath: null }),
@@ -10103,6 +10173,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           commandType: command.type,
           cause: `Delegated child thread ${childThreadId} did not create a run.`,
         });
+      }
+      if (workerLimits !== undefined) {
+        yield* Ref.update(effects, (existing) => [
+          ...existing,
+          {
+            id: `effect:${command.commandId}:worker.deadline`,
+            commandId: command.commandId,
+            threadId: childThreadId,
+            availableAt: workerLimits.deadlineAt,
+            request: { type: "worker.deadline" as const, deadlineAt: workerLimits.deadlineAt },
+          },
+        ]);
       }
       const spawnTransferId = yield* mapDispatchError(command)(
         idAllocator.allocate.contextTransfer({

@@ -6,6 +6,7 @@ import {
   MessageId,
   NodeId,
   type OrchestrationV2DomainEvent,
+  type WorkerExecutionLimits,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -131,7 +132,7 @@ const send = (threadId: ThreadId, text: string, type: "start_immediately" | "que
     });
   });
 
-const delegate = (parentThreadId: ThreadId, task: string) =>
+const delegate = (parentThreadId: ThreadId, task: string, workerLimits?: WorkerExecutionLimits) =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const parentRun = (yield* orchestrator.getThreadProjection(parentThreadId)).runs.at(-1)!;
@@ -142,6 +143,7 @@ const delegate = (parentThreadId: ThreadId, task: string) =>
       parentRunId: parentRun.id,
       parentNodeId: parentRun.rootNodeId!,
       task,
+      ...(workerLimits === undefined ? {} : { workerLimits }),
       modelSelection,
       runtimeMode: "full-access",
       interactionMode: "default",
@@ -2240,4 +2242,107 @@ it.effect.each([
         );
       }).pipe(Effect.provide(layerLive));
     }),
+);
+
+it.effect(
+  "persists bounded task deadlines, deduplicates replay, and refuses unsupported caps",
+  () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const parent = ThreadId.make("bounded-parent");
+      yield* createWatchingThread(parent, 1);
+      yield* send(parent, "work", "start_immediately");
+      const deadlineAt = DateTime.add(yield* DateTime.now, { minutes: 1 });
+      const limits = { deadlineAt, maxConcurrentTasks: 1 };
+      for (const unsupported of [
+        { maxTokens: 1 },
+        { maxCostUsd: 0 },
+        { denySecretReads: true as const },
+      ]) {
+        const result = yield* delegate(parent, "unsupported", { ...limits, ...unsupported }).pipe(
+          Effect.exit,
+        );
+        assert.isTrue(Exit.isFailure(result));
+      }
+      assert.equal((yield* orchestrator.getThreadProjection(parent)).subagents.length, 0);
+      const child = yield* delegate(parent, "bounded", limits);
+      assert.equal(yield* delegate(parent, "bounded", limits), child);
+      const projection = yield* orchestrator.getThreadProjection(child);
+      assert.deepEqual(projection.thread.workerLimits, limits);
+      assert.equal((yield* orchestrator.getThreadProjection(parent)).subagents.length, 1);
+      assert.isTrue(Exit.isFailure(yield* delegate(child, "nested").pipe(Effect.exit)));
+      assert.isTrue(Exit.isFailure(yield* delegate(parent, "over-cap").pipe(Effect.exit)));
+      const effects = yield* outbox.listByCommandId(CommandId.make("delegate:bounded"));
+      const deadline = effects.find((effect) => effect.request.type === "worker.deadline")!;
+      assert.equal(deadline.availableAt, DateTime.formatIso(deadlineAt));
+      const recovered = yield* outbox.reconcileAfterProcessLoss;
+      assert.equal(recovered.requeued, 0);
+      assert.equal(
+        (yield* outbox.listByCommandId(CommandId.make("delegate:bounded"))).filter(
+          (effect) => effect.request.type === "worker.deadline",
+        ).length,
+        1,
+      );
+      yield* TestClock.adjust("1 minute");
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      yield* worker.drain(20);
+      assert.equal(
+        (yield* outbox.listByCommandId(CommandId.make("delegate:bounded"))).find(
+          (effect) => effect.id === deadline.id,
+        )?.status,
+        "succeeded",
+      );
+      assert.isTrue(
+        (yield* orchestrator.getThreadProjection(child)).runs.every(
+          (run) => !["preparing", "starting", "running"].includes(run.status),
+        ),
+      );
+      assert.isTrue(
+        Exit.isFailure(yield* delegate(parent, "expired-without-limits").pipe(Effect.exit)),
+      );
+      assert.isTrue(
+        Exit.isFailure(
+          yield* delegate(parent, "extended-deadline", {
+            deadlineAt: DateTime.add(deadlineAt, { hours: 1 }),
+            maxConcurrentTasks: 10,
+          }).pipe(Effect.exit),
+        ),
+      );
+    }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("quarantines interrupted bounded workers instead of reusing an unconfirmed slot", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const parent = ThreadId.make("quarantine-parent");
+    yield* createWatchingThread(parent, 1);
+    yield* send(parent, "work", "start_immediately");
+    const child = yield* delegate(parent, "quarantine-child", {
+      deadlineAt: DateTime.add(yield* DateTime.now, { minutes: 1 }),
+      maxConcurrentTasks: 1,
+    });
+    yield* orchestrator.dispatch({
+      type: "thread.stop",
+      threadId: child,
+      commandId: CommandId.make("quarantine-stop"),
+      reason: "Stop requested",
+    });
+    const task = (yield* orchestrator.getThreadProjection(parent)).subagents[0]!;
+    yield* (yield* ProjectionStore.ProjectionStoreV2).apply({
+      id: EventId.make("event:quarantine-interrupted"),
+      type: "subagent.updated",
+      threadId: parent,
+      occurredAt: yield* DateTime.now,
+      payload: { ...task, status: "interrupted" },
+    });
+    assert.equal(
+      (yield* orchestrator.getThreadProjection(parent)).subagents[0]!.status,
+      "interrupted",
+    );
+    assert.isTrue(
+      Exit.isFailure(yield* delegate(parent, "quarantine-replacement").pipe(Effect.exit)),
+    );
+    assert.equal((yield* orchestrator.getThreadProjection(parent)).subagents.length, 1);
+  }).pipe(Effect.provide(layerTest)),
 );

@@ -41,7 +41,18 @@ const backgroundShell = (threadId: ThreadId, providerInstanceId: ProviderInstanc
   ],
 });
 
+const boundedThreadId = ThreadId.make("thread:bounded");
 const shells = new Map([
+  [
+    boundedThreadId,
+    {
+      ...liveThreadShell(boundedThreadId),
+      delegationLimits: {
+        deadlineAt: liveThreadShell(boundedThreadId).createdAt,
+        maxConcurrentTasks: 1,
+      },
+    },
+  ],
   [supervisedThreadId, liveThreadShell(supervisedThreadId, { runtimeMode: "approval-required" })],
   [
     planThreadId,
@@ -252,6 +263,13 @@ const fullAccessLinkedClient: McpInvocationContext.McpInvocationScope = {
 const previewOnly = { ...fullAccess, capabilities: new Set(["preview"] as const) };
 
 it.effect.each([
+  ["reads", threadCaller(boundedThreadId), {}, "ran"],
+  ["acts_as_caller", threadCaller(boundedThreadId), {}, "ran"],
+  ["starts_threads", threadCaller(boundedThreadId), {}, "capability_denied"],
+  ["writes_threads", threadCaller(boundedThreadId), {}, "capability_denied"],
+  ["writes", threadCaller(boundedThreadId), {}, "capability_denied"],
+  ["writes_with_capability", threadCaller(boundedThreadId), {}, "capability_denied"],
+  ["writes_environment", threadCaller(boundedThreadId), {}, "capability_denied"],
   ["reads", ended, {}, "ran"],
   ["reads", supervisedClient, {}, "ran"],
   ["reads", readOnlyClient, {}, "ran"],

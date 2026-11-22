@@ -10,6 +10,7 @@ import {
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -54,9 +55,30 @@ export class RuntimePolicyAboveCeilingError extends Schema.TaggedError<RuntimePo
 
 export const isRuntimePolicyAboveCeilingError = Schema.is(RuntimePolicyAboveCeilingError);
 
+export class WorkerDeadlineExceededError extends Schema.TaggedError<WorkerDeadlineExceededError>()(
+  "WorkerDeadlineExceededError",
+  { threadId: ThreadId },
+) {
+  override get message(): string {
+    return "The worker execution deadline has expired.";
+  }
+}
+const refuseExpiredWorker = Effect.fn("RuntimePolicyV2.refuseExpiredWorker")(function* (
+  thread: OrchestrationV2AppThread,
+) {
+  if (
+    thread.workerLimits !== undefined &&
+    DateTime.toEpochMillis(yield* DateTime.now) >=
+      DateTime.toEpochMillis(thread.workerLimits.deadlineAt)
+  ) {
+    return yield* new WorkerDeadlineExceededError({ threadId: thread.id });
+  }
+});
+
 export const RuntimePolicyV2Error = Schema.Union([
   RuntimePolicyResolveError,
   RuntimePolicyAboveCeilingError,
+  WorkerDeadlineExceededError,
 ]);
 export type RuntimePolicyV2Error = typeof RuntimePolicyV2Error.Type;
 
@@ -80,8 +102,9 @@ export class RuntimePolicyV2 extends Context.Service<RuntimePolicyV2, RuntimePol
 ) {}
 
 export const layer: Layer.Layer<RuntimePolicyV2> = Layer.succeed(RuntimePolicyV2, {
-  resolve: Effect.fn("RuntimePolicyV2.resolve")(function (input) {
-    return Effect.succeed({
+  resolve: Effect.fn("RuntimePolicyV2.resolve")(function* (input) {
+    yield* refuseExpiredWorker(input.thread);
+    return yield* Effect.succeed({
       runtimeMode: input.thread.runtimeMode,
       interactionMode: input.thread.interactionMode,
       cwd: input.thread.worktreePath,
@@ -131,6 +154,7 @@ export const layerEnforcingCeiling: Layer.Layer<
     const { managedPolicy } = yield* ServerSettings.ServerSettingsService;
     return RuntimePolicyV2.of({
       resolve: Effect.fn("RuntimePolicyV2.resolveWithinCeiling")(function* (input) {
+        yield* refuseExpiredWorker(input.thread);
         yield* refuseAboveCeiling(managedPolicy, input.thread);
         return yield* base.resolve(input);
       }),
@@ -156,6 +180,7 @@ export const layerFromProjectStore: Layer.Layer<
     const maxRuntimeMode = managedPolicy?.limits?.maxRuntimeMode;
     return RuntimePolicyV2.of({
       resolve: Effect.fn("RuntimePolicyV2.resolve")(function* (input) {
+        yield* refuseExpiredWorker(input.thread);
         yield* refuseAboveCeiling(managedPolicy, input.thread);
         const instance = yield* providerInstances.getInstance(input.modelSelection.instanceId);
         const supportedRuntimeModes =
