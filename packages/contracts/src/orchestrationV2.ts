@@ -3686,6 +3686,13 @@ export const OrchestrationV2Command = Schema.Union([
   }),
   Schema.Struct({
     type: Schema.Literal("runtime-request.respond"),
+    expectedInput: Schema.optional(
+      Schema.Struct({
+        runId: RunId,
+        questions: Schema.Array(OrchestrationV2UserInputQuestion),
+        expiresAt: IsoDateTime,
+      }),
+    ),
     commandId: CommandId,
     threadId: ThreadId,
     requestId: RuntimeRequestId,

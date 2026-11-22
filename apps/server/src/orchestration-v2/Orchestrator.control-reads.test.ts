@@ -714,7 +714,7 @@ it.effect(
           payload: {
             id: TurnItemId.make(`item:${mode}`),
             threadId,
-            runId: null,
+            runId: RunId.make("guarded-run"),
             nodeId,
             providerThreadId: null,
             providerTurnId: null,
@@ -734,6 +734,37 @@ it.effect(
         const answers = { text: "Blue", list: ["Red"], codex: { answers: ["Green"] } };
         const normalizedAnswers = { ...answers, codex: ["Green"] };
         if (mode === "live") {
+          for (const [index, expectedInput] of [
+            {
+              runId: RunId.make("wrong-run"),
+              questions: [],
+              expiresAt: "2099-01-01T00:00:00.000Z",
+            },
+            {
+              runId: RunId.make("guarded-run"),
+              questions: [{ id: "changed", header: "Changed", question: "Changed?", options: [] }],
+              expiresAt: "2099-01-01T00:00:00.000Z",
+            },
+            { runId: RunId.make("guarded-run"), questions: [], expiresAt: DateTime.formatIso(now) },
+          ].entries()) {
+            const commandId = CommandId.make(`guard-rejected:${index}`);
+            const outcome = yield* orchestrator
+              .dispatch({
+                type: "runtime-request.respond",
+                commandId,
+                threadId,
+                requestId,
+                answers,
+                expectedInput,
+              })
+              .pipe(Effect.exit);
+            assert.isTrue(Exit.isFailure(outcome));
+            assert.deepEqual(yield* outbox.listByCommandId(commandId), []);
+            assert.equal(
+              (yield* projections.getRuntimeRequest(threadId, requestId))?.status,
+              "pending",
+            );
+          }
           const pending = yield* projections.getRuntimeResponseContext(threadId, requestId);
           const sequence = yield* orchestrator.getThreadEventSequence(threadId);
           for (const [index, value] of [
@@ -778,6 +809,11 @@ it.effect(
                 threadId,
                 requestId,
                 answers,
+                expectedInput: {
+                  runId: RunId.make("guarded-run"),
+                  questions: [],
+                  expiresAt: "2099-01-01T00:00:00.000Z",
+                },
               }
             : {
                 type: "thread.user-input.dismiss",

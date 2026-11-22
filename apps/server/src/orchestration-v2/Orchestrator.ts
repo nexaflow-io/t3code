@@ -1,3 +1,4 @@
+import * as NodeUtil from "node:util";
 import type {
   OrchestrationV2ThreadLinkMetadata,
   GuestShareId,
@@ -11405,6 +11406,21 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           commandId: command.commandId,
           commandType: command.type,
           cause: `Runtime request ${command.requestId} was not found.`,
+        });
+      }
+      if (
+        command.expectedInput !== undefined &&
+        (runtimeRequest.kind !== "user_input" ||
+          Date.parse(command.expectedInput.expiresAt) <=
+            DateTime.toEpochMillis(yield* DateTime.now) ||
+          context.item?.runId !== command.expectedInput.runId ||
+          context.item?.type !== "user_input_request" ||
+          !NodeUtil.isDeepStrictEqual(context.item.questions, command.expectedInput.questions))
+      ) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: "User-input prompt or run changed; no response was applied.",
         });
       }
       if (runtimeRequest.status !== "pending") {

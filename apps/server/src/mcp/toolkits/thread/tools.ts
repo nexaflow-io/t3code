@@ -136,10 +136,19 @@ const PendingRequestTool = Tool.make("t3_pending_request", {
     threadId: Schema.optional(ThreadId),
     requestId: Schema.optional(RuntimeRequestId),
     answers: Schema.optional(ProviderUserInputAnswers),
+    expectedInput: Schema.optional(
+      Schema.Struct({ runId: RunId, questions: Schema.Array(question), expiresAt: IsoDateTime }),
+    ),
   }),
   success: Schema.Union([
     Schema.Struct({ requestIds: Schema.Array(RuntimeRequestId) }),
-    Schema.Struct({ requestId: RuntimeRequestId, questions: Schema.Array(question) }),
+    Schema.Struct({
+      requestId: RuntimeRequestId,
+      questions: Schema.Array(question),
+      runId: Schema.NullOr(RunId),
+      atomicResponseGuard: Schema.Literal(true),
+      status: Schema.String,
+    }),
     OrchestrationV2DispatchCommandResult,
   ]),
 })
