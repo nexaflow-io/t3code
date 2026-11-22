@@ -1932,6 +1932,12 @@ export function threadShellFromProjection(
     providerInstanceId: projection.thread.providerInstanceId,
     modelSelection: projection.thread.modelSelection,
     runtimeMode: projection.thread.runtimeMode,
+    ...(projection.thread.workerLimits === undefined
+      ? {}
+      : { workerLimits: projection.thread.workerLimits }),
+    ...(projection.thread.delegationLimits === undefined
+      ? {}
+      : { delegationLimits: projection.thread.delegationLimits }),
     interactionMode: projection.thread.interactionMode,
     branch: projection.thread.branch,
     worktreePath: projection.thread.worktreePath,
@@ -2246,6 +2252,12 @@ function shellFromState(input: {
     providerInstanceId: input.state.thread.providerInstanceId,
     modelSelection: input.state.thread.modelSelection,
     runtimeMode: input.state.thread.runtimeMode,
+    ...(input.state.thread.workerLimits === undefined
+      ? {}
+      : { workerLimits: input.state.thread.workerLimits }),
+    ...(input.state.thread.delegationLimits === undefined
+      ? {}
+      : { delegationLimits: input.state.thread.delegationLimits }),
     interactionMode: input.state.thread.interactionMode,
     branch: input.state.thread.branch,
     worktreePath: input.state.thread.worktreePath,

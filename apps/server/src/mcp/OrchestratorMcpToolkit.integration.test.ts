@@ -20,6 +20,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -31,6 +32,7 @@ import { McpSchema, McpServer } from "effect/ai";
 import { CodexOrchestratorReplayHarness } from "../orchestration-v2/Adapters/CodexAdapterV2.testkit.ts";
 import * as CommandReceiptStore from "../orchestration-v2/CommandReceiptStore.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
+import * as ThreadSearch from "../orchestration-v2/ThreadSearch.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
@@ -813,3 +815,256 @@ describe("orchestrator MCP toolkit", () => {
     }),
   );
 });
+
+it.live("responds through official pending-request MCP and resumes the same Codex replay run", () =>
+  Effect.gen(function* () {
+    const cwd = yield* checkpointWorkspace("pending-input-official-mcp");
+    const raw = yield* readDelegatedTaskStatusTranscript(queuedFollowupResult);
+    const end = raw.entries.findIndex((entry) => entry.label === "parent.turn/started");
+    expect(end).toBeGreaterThan(0);
+    const nativeThreadId = "019f1000-0000-7000-8000-000000000001";
+    const nativeTurnId = "019f1000-0000-7000-8000-000000000002";
+    const answer = "Use the existing safe local default. This is not a permission approval.";
+    const transcript = yield* CodexOrchestratorReplayHarness.decodeTranscript(
+      materializeReplayTranscriptWorkspace(
+        {
+          ...raw,
+          entries: [
+            ...raw.entries.slice(0, end + 1).map((entry) =>
+              entry.type === "expect_outbound" && entry.label === "parent.turn/start"
+                ? {
+                    ...entry,
+                    frame: {
+                      ...(entry.frame as Record<string, unknown>),
+                      params: {
+                        ...(entry.frame as { params: Record<string, unknown> }).params,
+                        approvalPolicy: "untrusted",
+                        sandboxPolicy: { type: "readOnly" },
+                      },
+                    },
+                  }
+                : entry,
+            ),
+            {
+              type: "emit_inbound",
+              label: "bounded.question",
+              frame: {
+                id: 100,
+                method: "item/tool/requestUserInput",
+                params: {
+                  threadId: nativeThreadId,
+                  turnId: nativeTurnId,
+                  itemId: "bounded-question-item",
+                  isBlocking: true,
+                  questions: [
+                    {
+                      id: " choice ",
+                      header: "Design",
+                      question: "Choose a safe local default",
+                      options: [],
+                    },
+                  ],
+                },
+              },
+            },
+            {
+              type: "expect_outbound",
+              label: "bounded.answer",
+              frame: {
+                id: 100,
+                result: { answers: { " choice ": { answers: [answer] } } },
+              },
+            },
+            {
+              type: "emit_inbound",
+              label: "bounded.completed",
+              frame: {
+                method: "turn/completed",
+                params: {
+                  threadId: nativeThreadId,
+                  turn: {
+                    id: nativeTurnId,
+                    items: [],
+                    status: "completed",
+                    error: null,
+                    startedAt: null,
+                    completedAt: null,
+                    durationMs: null,
+                  },
+                },
+              },
+            },
+          ],
+        },
+        cwd,
+      ),
+    );
+    const orchestration = ProviderReplayHarness.layerProviderReplay(
+      {
+        name: "pending-input-official-mcp",
+        transcript,
+        commands: [],
+        runtimePolicyOverride: { cwd },
+      },
+      CodexOrchestratorReplayHarness,
+    );
+    const management = ThreadManagementService.layer.pipe(
+      Layer.provideMerge(orchestration),
+      Layer.provide(ServerSettings.layerTest()),
+      Layer.provide(CommandReceiptStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory))),
+    );
+    const testLayer = McpHttpServer.layerThreadToolkit.pipe(
+      Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
+      Layer.provideMerge(management),
+      Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
+      Layer.provide(layerUnusedScheduledTaskStub),
+      Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
+      Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
+      Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
+      Layer.provide(ServerSettings.layerTest()),
+      Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+    );
+    yield* Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const server = yield* McpServer.McpServer;
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("pending:create"),
+        threadId: parentThreadId,
+        projectId,
+        title: "MCP replay parent",
+        modelSelection: codexSelection,
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: cwd,
+      });
+      const start = yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make("pending:start"),
+        threadId: parentThreadId,
+        messageId: MessageId.make("pending:message"),
+        text: parentPrompt,
+        attachments: [],
+        modelSelection: codexSelection,
+        dispatchMode: { type: "start_immediately" },
+      });
+      yield* orchestrator
+        .streamStoredEventsFrom({ threadId: parentThreadId, afterSequence: start.sequence })
+        .pipe(
+          Stream.filter(
+            (s) =>
+              s.event.type === "runtime-request.updated" && s.event.payload.status === "pending",
+          ),
+          Stream.runHead,
+          Effect.flatMap(
+            Option.match({
+              onNone: () => Effect.die("No pending question"),
+              onSome: () => Effect.void,
+            }),
+          ),
+        );
+      const before = yield* orchestrator.getThreadProjection(parentThreadId);
+      expect(before.runs).toHaveLength(1);
+      const runId = before.runs[0]!.id;
+      const request = before.runtimeRequests.find((r) => r.kind === "user_input")!;
+      expect(request.status).toBe("pending");
+      const scope: McpInvocationContext.McpInvocationScope = {
+        environmentId: EnvironmentId.make("environment:mcp-replay"),
+        requestNamespace: "pending-official",
+        thread: undefined,
+        client: undefined,
+        capabilities: new Set(["orchestration"]),
+        issuedAt: 1,
+      };
+      const invoke = (args: Record<string, unknown>) =>
+        server
+          .callTool({
+            name: "t3_pending_request",
+            arguments: { threadId: parentThreadId, ...args },
+          })
+          .pipe(
+            Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
+            Effect.provideService(McpSchema.McpServerClient, client),
+          );
+      const listed = yield* invoke({ action: "list" });
+      expect(listed.structuredContent).toEqual({ requestIds: [request.id] });
+      const read = yield* invoke({ action: "read", requestId: request.id });
+      expect(read.isError).not.toBe(true);
+      const question = read.structuredContent as {
+        runId: string;
+        questions: Array<{ id: string; question: string }>;
+        status: string;
+        atomicResponseGuard: boolean;
+      };
+      expect(question.runId).toBe(runId);
+      expect(question.status).toBe("pending");
+      expect(question.atomicResponseGuard).toBe(true);
+      const expectedInput = {
+        runId,
+        questions: question.questions,
+        expiresAt: DateTime.formatIso(DateTime.add(yield* DateTime.now, { minutes: 1 })),
+      };
+      const args = {
+        action: "respond",
+        requestId: request.id,
+        answers: { [question.questions[0]!.id]: [answer] },
+        expectedInput,
+      };
+      const stale = yield* invoke({
+        ...args,
+        expectedInput: {
+          ...expectedInput,
+          questions: question.questions.map((q) => ({ ...q, question: "changed" })),
+        },
+      });
+      expect(stale.isError).toBe(true);
+      expect(JSON.stringify(stale.content)).toContain("User-input prompt or run changed");
+      const expired = yield* invoke({
+        ...args,
+        expectedInput: { ...expectedInput, expiresAt: "2000-01-01T00:00:00.000Z" },
+      });
+      expect(expired.isError).toBe(true);
+      expect(
+        (yield* orchestrator.getThreadProjection(parentThreadId)).runtimeRequests.find(
+          (r) => r.id === request.id,
+        )?.status,
+      ).toBe("pending");
+      const responded = yield* invoke(args);
+      expect(responded.isError, JSON.stringify(responded)).not.toBe(true);
+      yield* orchestrator
+        .streamStoredEventsFrom({ threadId: parentThreadId, afterSequence: start.sequence })
+        .pipe(
+          Stream.filter(
+            (s) =>
+              s.event.type === "run.updated" &&
+              s.event.payload.id === runId &&
+              s.event.payload.status === "completed",
+          ),
+          Stream.runHead,
+          Effect.flatMap(
+            Option.match({
+              onNone: () => Effect.die("Same run did not complete"),
+              onSome: () => Effect.void,
+            }),
+          ),
+        );
+      const after = yield* orchestrator.getThreadProjection(parentThreadId);
+      expect(after.runs).toHaveLength(1);
+      expect(after.runs[0]!.id).toBe(runId);
+      expect(after.runs[0]!.status).toBe("completed");
+      expect(after.providerTurns).toHaveLength(1);
+      expect(after.providerTurns[0]!.id).toBe(before.providerTurns[0]!.id);
+      expect(after.providerTurns[0]!.nativeTurnRef).toEqual(before.providerTurns[0]!.nativeTurnRef);
+      expect(after.providerTurns[0]!.status).toBe("completed");
+      expect(
+        (yield* invoke({ action: "read", requestId: request.id })).structuredContent,
+      ).toMatchObject({ runId, status: "resolved" });
+      expect((yield* invoke(args)).isError).toBe(true);
+    }).pipe(Effect.provide(testLayer));
+  }),
+);

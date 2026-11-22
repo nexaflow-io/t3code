@@ -236,6 +236,25 @@ export const layerExecutor: Layer.Layer<
                     }),
                 ),
               );
+          case "worker.deadline":
+            return threads
+              .dispatch({
+                type: "thread.stop",
+                commandId: CommandId.make(`${effect.id}:stop`),
+                threadId: effect.threadId,
+                reason: "Worker execution deadline reached.",
+              })
+              .pipe(
+                Effect.asVoid,
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationEffectExecutionError({
+                      effectId: effect.id,
+                      effectType: effect.request.type,
+                      cause,
+                    }),
+                ),
+              );
           case "provider-turn.start":
             return startRun(effect, effect.request.runId, willRetry).pipe(
               Effect.mapError(

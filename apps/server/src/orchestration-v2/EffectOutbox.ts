@@ -34,6 +34,10 @@ import { forkParked } from "../serverActivation.ts";
 
 export const OrchestrationEffectRequestV2 = Schema.Union([
   Schema.Struct({
+    type: Schema.Literal("worker.deadline"),
+    deadlineAt: Schema.DateTimeUtcFromString,
+  }),
+  Schema.Struct({
     type: Schema.Literal("provider-runtime.continue"),
     sourceRunId: RunId,
     processLossCount: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
@@ -142,6 +146,7 @@ export const OrchestrationEffectRequestV2 = Schema.Union([
 export type OrchestrationEffectRequestV2 = typeof OrchestrationEffectRequestV2.Type;
 
 export const REPLAY_SAFE_EFFECT_TYPES_AFTER_PROCESS_LOSS = [
+  "worker.deadline",
   "provider-runtime.continue",
   "provider-session.detach",
   "provider-thread.rollback",
@@ -369,6 +374,8 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
               )
             )
             AND (
+              (candidate.effect_type = 'worker.deadline' AND active.effect_type = 'worker.deadline')
+              OR (candidate.effect_type != 'worker.deadline' AND active.effect_type != 'worker.deadline' AND (
               (
                 candidate.effect_type = 'thread-title.generate'
                 AND active.effect_type = 'thread-title.generate'
@@ -378,6 +385,7 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
                 candidate.effect_type != 'thread-title.generate'
                 AND active.effect_type != 'thread-title.generate'
               )
+              ))
             )
         )
         AND ${

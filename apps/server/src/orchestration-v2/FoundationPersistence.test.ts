@@ -2705,6 +2705,44 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
     }),
   );
 
+  it.effect("deadlines survive recovery without blocking normal effects", () =>
+    Effect.gen(function* () {
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const commandId = CommandId.make("command:deadline-recovery");
+      const threadId = ThreadId.make("thread:deadline-recovery");
+      const deadlineAt = DateTime.add(yield* DateTime.now, { minutes: 1 });
+      yield* outbox.enqueue([
+        {
+          id: "effect:deadline",
+          commandId,
+          threadId,
+          availableAt: deadlineAt,
+          request: { type: "worker.deadline", deadlineAt },
+        },
+        {
+          id: "effect:normal",
+          commandId,
+          threadId,
+          request: { type: "provider-turn.start", runId: RunId.make("run:deadline") },
+        },
+      ]);
+      const normal = yield* outbox.claimNext({ workerId: "normal" });
+      assert.isTrue(Option.isSome(normal));
+      if (Option.isSome(normal)) assert.equal(normal.value.id, "effect:normal");
+      yield* TestClock.adjust("1 minute");
+      const deadline = yield* outbox.claimNext({ workerId: "first" });
+      assert.isTrue(Option.isSome(deadline));
+      if (Option.isSome(deadline)) assert.equal(deadline.value.id, "effect:deadline");
+      const recovered = yield* outbox.reconcileAfterProcessLoss;
+      assert.equal(recovered.requeued, 1);
+      const reclaimed = yield* outbox.claimNext({ workerId: "restarted" });
+      assert.isTrue(Option.isSome(reclaimed));
+      if (Option.isSome(reclaimed)) assert.equal(reclaimed.value.id, "effect:deadline");
+      assert.isTrue(Option.isNone(yield* outbox.claimNext({ workerId: "duplicate" })));
+      yield* outbox.succeed({ effectId: "effect:deadline", workerId: "restarted" });
+    }),
+  );
+
   it.effect("allows only one worker to claim an available effect", () =>
     Effect.gen(function* () {
       const outbox = yield* EffectOutbox.EffectOutboxV2;

@@ -67,10 +67,13 @@ const topOfPinnedRunKey = Effect.fn("mcp.topOfPinnedRunKey")(function* (
   return topOfPinnedRunOrderKey(pinnedKeys) ?? undefined;
 });
 
-const readQuestion = Effect.fn("mcp.readQuestion")(function* (input: {
-  threadId?: ThreadId | undefined;
-  requestId: RuntimeRequestId;
-}) {
+const readQuestion = Effect.fn("mcp.readQuestion")(function* (
+  input: {
+    threadId?: ThreadId | undefined;
+    requestId: RuntimeRequestId;
+  },
+  allowResolved = false,
+) {
   const context = yield* readThread(input.threadId, ["runtimeRequests", "turnItems"]);
   const request = context.projection.runtimeRequests.find(
     (request) => request.id === input.requestId && request.kind === "user_input",
@@ -83,7 +86,7 @@ const readQuestion = Effect.fn("mcp.readQuestion")(function* (input: {
       code: "invalid_request",
       message: "The pending user-input request was not found.",
     });
-  if (request.status !== "pending")
+  if (request.status !== "pending" && !allowResolved)
     return yield* new OrchestratorMcpFailure({
       code: "invalid_request",
       message:
@@ -258,8 +261,17 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
           };
         }
         const requestId = yield* required(input.requestId, "requestId");
-        const { item } = yield* readQuestion({ threadId: input.threadId, requestId });
-        return { requestId, questions: item.questions };
+        const { item, request } = yield* readQuestion(
+          { threadId: input.threadId, requestId },
+          true,
+        );
+        return {
+          requestId,
+          questions: item.questions,
+          runId: item.runId,
+          atomicResponseGuard: true as const,
+          status: request.status,
+        };
       }),
     ),
     writesThread((input) =>
@@ -273,6 +285,7 @@ export const layer = McpToolAccess.toLayer(ThreadToolkit, {
         const result = yield* threads
           .dispatch({
             type: "runtime-request.respond",
+            ...(input.expectedInput === undefined ? {} : { expectedInput: input.expectedInput }),
             threadId: projection.thread.id,
             commandId: yield* newCommandId(),
             requestId,

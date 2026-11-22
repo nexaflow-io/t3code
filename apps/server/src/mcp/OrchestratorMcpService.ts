@@ -2823,6 +2823,18 @@ const make = Effect.gen(function* () {
       };
     }),
     delegateTask: Effect.fn("OrchestratorMcpService.delegateTask")(function* (callerScope, input) {
+      const { scope, parent } = yield* loadThreadCaller(callerScope, "delegate_task");
+      if (
+        (input.workerLimits !== undefined ||
+          parent.thread.workerLimits !== undefined ||
+          parent.thread.delegationLimits !== undefined) &&
+        input.target?.environmentId !== undefined
+      ) {
+        return yield* failure(
+          "invalid_request",
+          "Worker limits are only supported for local tasks.",
+        );
+      }
       const environmentId =
         input.target === undefined
           ? undefined
@@ -2839,7 +2851,6 @@ const make = Effect.gen(function* () {
           ? awaitTask(scope, taskId, taskId, input.timeoutMs)
           : readTask(scope, taskId, false, true);
       }
-      const { scope, parent } = yield* loadThreadCaller(callerScope, "delegate_task");
       if (
         input.target?.projectId !== undefined &&
         input.target.projectId !== parent.thread.projectId
@@ -2934,6 +2945,7 @@ const make = Effect.gen(function* () {
               parentRunId: parentRun.id,
               parentNodeId,
               task: taskPrompt(input),
+              ...(input.workerLimits === undefined ? {} : { workerLimits: input.workerLimits }),
               ...(input.title === undefined ? {} : { title: input.title }),
               modelSelection: target.modelSelection,
               runtimeMode,
@@ -3211,6 +3223,15 @@ const make = Effect.gen(function* () {
     createThreads: Effect.fn("OrchestratorMcpService.createThreads")(
       function* (callerScope, input) {
         const { scope, parent } = yield* loadThreadCaller(callerScope, "create_threads");
+        if (
+          parent.thread.workerLimits !== undefined ||
+          parent.thread.delegationLimits !== undefined
+        ) {
+          return yield* failure(
+            "invalid_request",
+            "Bounded task callers must use delegated tasks.",
+          );
+        }
         const parentRun = ThreadManagementService.latestActiveRun(parent);
         if (
           parentRun === undefined ||
